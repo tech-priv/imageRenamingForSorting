@@ -9,11 +9,12 @@ NC=$'\e[m'
 
 TMP_FOLDER="/READY_NAS/Media/Pictures-Modified-20200212/"
 LOG_FILE="./log-$(date +%Y-%M-%d%t%H:%M:%S).log"
-DEBUG=0
+DEBUG=1
 
 # Global Variables
 NEW_FILE_NAME=""
 EXIF_TIMESTAMP=""
+IMG_INDEX=0
 isImage=0
 isVideo=0
 
@@ -70,8 +71,28 @@ function isWhatsappMediaFile (){
 }
 
 function isScreenshot (){
-	if [[ "${1}" =~ Screenshot-[0-9]{8}-[0-9]{6} ]]; then
-    	printf "%s\n" "${1} is a Screenshot"
+	if [[ "${1}" =~ Screenshot_[0-9]{8}-[0-9]{6} ]]; then
+        printf "%s\n" "${1} is a Screenshot"
+    else
+        return 0
+    fi
+
+    YEAR="${1:11:4}"
+	MONTH="${1:13:2}"
+	DAY="${1:15:2}"
+    HOUR="${1:18:2}"
+	MIN="${1:20:2}"
+	SEC="${1:22:2}"
+
+    NEW_FILE_NAME="$YEAR-$MONTH-$DAY-$HOUR:$MIN:$SEC"
+    EXIF_TIMESTAMP="$YEAR:$MONTH:$DAY $HOUR:$MIN:$SEC"
+
+    return 1
+}
+
+function isIMGStyle (){
+	if [[ "${1}" =~ IMG_[0-9]{8}_[0-9]{6}__[0-9]{2} ]]; then
+        printf "%s\n" "${1} is a IMG_Date format"
     else
         return 0
     fi
@@ -80,11 +101,62 @@ function isScreenshot (){
 	MONTH="${1:8:2}"
 	DAY="${1:10:2}"
     HOUR="${1:13:2}"
-	MIN="${1:16:2}"
-	SEC="${1:19:2}"
+	MIN="${1:15:2}"
+	SEC="${1:17:2}"
+    INDEX="${1:23:2}"
 
-    NEW_FILE_NAME="$YEAR-$MONTH-$DAY-$HOUR:$MIN:$SEC"
+    NEW_FILE_NAME="$YEAR-$MONTH-$DAY-$HOUR:$MIN:$SEC-$INDEX"
     EXIF_TIMESTAMP="$YEAR:$MONTH:$DAY $HOUR:$MIN:$SEC"
+
+    return 1
+}
+
+function isIMGStyleV2 (){
+	if [[ "${1}" =~ IMG_[0-9]{8}_[0-9]{6} ]]; then
+        printf "%s\n" "${1} is a IMG_Date format"
+    else
+        return 0
+    fi
+
+    YEAR="${1:4:4}"
+	MONTH="${1:8:2}"
+	DAY="${1:10:2}"
+    HOUR="${1:13:2}"
+	MIN="${1:15:2}"
+	SEC="${1:17:2}"
+
+    NEW_FILE_NAME="$YEAR-$MONTH-$DAY-$HOUR:$MIN:$SEC-$IMG_INDEX"
+    EXIF_TIMESTAMP="$YEAR:$MONTH:$DAY $HOUR:$MIN:$SEC"
+
+    let "IMG_INDEX=IMG_INDEX+1"
+
+    return 1
+}
+
+function setDateFromDirectory (){
+
+    # Is the directory of type IMG_1234.jpg
+	if [[ "${2}" =~ [0-9]{4}-[0-9]{2}-[0-9]{2} ]]; then
+        printf "%s\n" "${1} directory is named with the date"
+    else
+        return 0
+    fi
+
+
+    # Is the image of type IMG_1234.jpg
+	if [[ "${1}" =~ IMG_[0-9]{4} ]]; then
+        INDEX="${1:4:4}"
+    else
+        INDEX="$IMG_INDEX"
+        let "IMG_INDEX=IMG_INDEX+1"
+    fi
+
+    YEAR="${2:0:4}"
+	MONTH="${2:5:2}"
+	DAY="${2:8:2}"
+
+    NEW_FILE_NAME="${2}-$INDEX"
+    EXIF_TIMESTAMP="$YEAR:$MONTH:$DAY 00:00:00"
 
     return 1
 }
@@ -138,20 +210,24 @@ for filename in $(find "$INPUT/" -type f); do
     shortName=${filename##*/}
 	fullpath=$(readlink -f "$filename")
 	dirName=$(dirname "$fullpath")
+    currentShortDir=$(basename "$dirName")
     extension=$(echo ${filename##*.} | tr [:upper:] [:lower:])
     if [ "$DEBUG" == 1  ]; then
-		echo "Name = $shortName"
-		echo "Ext = $extension"
+		echo "Filename = $filename"
+        echo "Short name = $shortName"
+		echo "Extension = $extension"
         echo "Fullpath = $fullpath"
 	fi
 
+    cd "$dirName"
+
     # Pictures only
-    if $(file "$filename" | grep -qE 'image|bitmap'); then
+    if $(file "$shortName" | grep -qE 'image|bitmap'); then
 		printf "$Magenta%s$NC\n" "File $shortName is an image"
 		isImage=1
         isVideo=0
         createdTime="$(exiftool "$fullpath" | grep -oP '(?<=Date/Time Original              : ).*' | tail -n1)"
-    elif $(file "$filename" | grep -qE 'Media'); then
+    elif $(file "$shortName" | grep -qE 'Media'); then
 		printf "$Magenta%s$NC\n" "File $shortName is a video"
         isVideo=1
         isImage=0
@@ -160,11 +236,8 @@ for filename in $(find "$INPUT/" -type f); do
 		printf "$Yellow%s$NC\n" "Not an image nor a video. Skipping..."
         continue
     fi
-#        echo "Date Time = $createdTime"
 
 		if [ -z "$createdTime" ]; then
-#           createdTime="$(exiftool "$fullpath" | grep -oP '(?<=File Modification Date/Time     : ).*' | tail -n1)"
-#           echo "New Date Time = $createdTime"
 
             printf "$Yellow%s$NC\n" "[WARNING]: No metadata available for $shortName"
 
@@ -173,8 +246,17 @@ for filename in $(find "$INPUT/" -type f); do
                 printf "$Blue%s$NC\n" "[INFO]: Not Whatsapp media"
                 isScreenshot "$shortName"
                 if [ "$?" == 0 ]; then
-				    printf "$Red%s$NC\n" "[ERROR]: No information found for file $shortName. Skipping..."
-                    continue;
+                    isIMGStyle "$shortName"
+                    if [ "$?" == 0 ]; then
+                        isIMGStyleV2 "$shortName"
+                        if [ "$?" == 0 ]; then
+	    			        printf "$Yellow%s$NC\n" "[WARNING]: No information found for file $shortName. Trying to set date from folder directory < $currentShortDir >..."
+                            setDateFromDirectory "$shortName" "$currentShortDir"
+                            if [ "$?" == 0 ]; then
+                                printf "$Red%s$NC\n" "[ERROR]: Directory name is not of type YYYY-MM-DD and thus image cannot be renamed"
+                            fi
+                        fi
+                    fi
                 fi
             fi
 
@@ -182,11 +264,10 @@ for filename in $(find "$INPUT/" -type f); do
 		else
             parseDateTimeMetaData "$createdTime"
 
-            #printf "$Yellow%s$NC\n" "[WARNING]: New File Name = $NEW_FILE_NAME"
         fi
 
         newFile="$OUTPUT/$NEW_FILE_NAME.$extension"
-
+        echo "timestamp = $EXIF_TIMESTAMP"
         # Copying new file
         if ! [ -f "$newFile" ]; then
             printf "$Green%s$NC\n" "Copying < $fullpath > to < $newFile >"
@@ -196,6 +277,4 @@ for filename in $(find "$INPUT/" -type f); do
         else
             printf "$Blue%s$NC\n" "[INFO] File < $newFile > already exist !"
         fi
-#    fi
 done
-
